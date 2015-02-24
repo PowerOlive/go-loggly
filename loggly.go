@@ -22,6 +22,11 @@ var debug = Debug("loggly")
 
 var nl = []byte{'\n'}
 
+var (
+	defaultHTTPClient *http.Client
+	httpClientMu      sync.RWMutex
+)
+
 type Level int
 
 const (
@@ -60,6 +65,14 @@ type Client struct {
 	buffer   [][]byte
 	tags     []string
 	sync.Mutex
+}
+
+// SetHTTPClient sets the HTTP client the loggly client is going to use to
+// connect to the loggly API.
+func SetHTTPClient(newClient *http.Client) {
+	httpClientMu.Lock()
+	defaultHTTPClient = newClient
+	httpClientMu.Unlock()
 }
 
 // New returns a new loggly client with the given `token`.
@@ -221,6 +234,16 @@ func (c *Client) Emergency(t string, props ...Message) error {
 
 // Flush the buffered messages.
 func (c *Client) Flush() error {
+	httpClientMu.RLock()
+	defer httpClientMu.RUnlock()
+
+	if defaultHTTPClient == nil {
+		// This error is actually not catched and when it happens start() will
+		// simply try again after c.FlushInterval.
+		debug("no http client.")
+		return fmt.Errorf("No HTTP client provided.")
+	}
+
 	c.Lock()
 
 	if len(c.buffer) == 0 {
@@ -235,7 +258,6 @@ func (c *Client) Flush() error {
 	c.buffer = nil
 	c.Unlock()
 
-	client := &http.Client{}
 	debug("POST %s with %d bytes", c.Endpoint, len(body))
 	req, err := http.NewRequest("POST", c.Endpoint, bytes.NewBuffer(body))
 	if err != nil {
@@ -252,7 +274,7 @@ func (c *Client) Flush() error {
 		req.Header.Add("X-Loggly-Tag", tags)
 	}
 
-	res, err := client.Do(req)
+	res, err := defaultHTTPClient.Do(req)
 	if err != nil {
 		debug("error: %v", err)
 		return err
